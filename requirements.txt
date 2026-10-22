@@ -1,0 +1,16 @@
+# Recon Orion Agent — Python dependencies
+#
+# Everything else (subprocess, json, argparse, concurrent.futures, pathlib,
+# hashlib, threading, etc.) is Python 3.11+ stdlib — no install needed.
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# On Kali you may need:
+#   pip install -r requirements.txt --break-system-packages
+# or use a venv:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt
+
+pydantic>=2.0,<3.0        # scope.json + tool-call arg validation
+ollama>=0.2.0             # Ollama Python client (POST /api/chat wrapper)

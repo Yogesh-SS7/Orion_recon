@@ -1,0 +1,253 @@
+================================================================================
+  RECON ORION — OPERATIONS REFERENCE
+  All commands you might need to set up and run the agent.
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 0. PREREQUISITES — Run once on a fresh Kali box
+────────────────────────────────────────────────────────────────────────────────
+
+# Install Ollama (the local LLM runtime)
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull the model (only needs to happen once — ~4 GB download)
+ollama pull qwen2.5:7b
+
+# Install Python dependencies (only 2 packages)
+pip install -r requirements.txt --break-system-packages
+
+# If pip gives errors about system packages, use a venv instead:
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 1. STARTING OLLAMA
+────────────────────────────────────────────────────────────────────────────────
+
+# Start Ollama in the background (keep this running in a separate terminal)
+ollama serve
+
+# Check it's running
+curl http://localhost:11434/api/tags
+
+# List downloaded models
+ollama list
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 2. RUNNING THE AGENT — Quick mode (no JSON needed)
+────────────────────────────────────────────────────────────────────────────────
+
+# Simplest possible run — just give it a domain
+python3 agent.py --target evil.com
+
+# Short flag version
+python3 agent.py -t evil.com
+
+# With exclusions — keep staging out of scope
+python3 agent.py -t evil.com --exclude staging.evil.com
+
+# Multiple exclusions
+python3 agent.py -t evil.com --exclude staging.evil.com dev.evil.com internal.evil.com
+
+# Custom output folder
+python3 agent.py -t evil.com --outdir /home/kali/engagements/evil_oct22/
+
+# Limit how many model turns it runs (default is 30)
+python3 agent.py -t evil.com --max-iterations 15
+
+# Change the batch size cap (default 4 — how many tools per model turn)
+python3 agent.py -t evil.com --max-batch-size 2
+
+# Bigger context window if your GPU has VRAM to spare (default 8192)
+python3 agent.py -t evil.com --num-ctx 16384
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 3. RUNNING THE AGENT — Full scope.json mode (fine-grained control)
+────────────────────────────────────────────────────────────────────────────────
+
+# Edit scope.json first (set your targets, exclusions, rate limits, timeouts)
+nano scope.json
+
+# Then run
+python3 agent.py scope.json
+
+# With a custom output folder
+python3 agent.py scope.json --outdir /home/kali/engagements/acme/
+
+# Fewer iterations
+python3 agent.py scope.json --max-iterations 20
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 4. RESUMING A CRASHED OR INTERRUPTED RUN
+────────────────────────────────────────────────────────────────────────────────
+
+# Find your output folder (auto-named from scope hash, or your --outdir)
+ls recon_*/
+
+# Resume — picks up from the last complete turn in agent.log
+python3 agent.py --target evil.com --resume recon_13ece8616c7c/
+
+# Resume with full scope.json
+python3 agent.py scope.json --resume recon_13ece8616c7c/
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 5. SWAPPING THE MODEL
+────────────────────────────────────────────────────────────────────────────────
+
+# Default is qwen2.5:7b — swap to any Ollama model that supports tool-calling
+python3 agent.py -t evil.com --model qwen2.5:14b
+python3 agent.py -t evil.com --model llama3.1:8b
+python3 agent.py -t evil.com --model mistral-nemo
+
+# Pull a different model first
+ollama pull qwen2.5:14b
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 6. READING OUTPUT
+────────────────────────────────────────────────────────────────────────────────
+
+# Final ranked candidate list (written when agent finishes or is interrupted)
+cat recon_<hash>/summary.md
+
+# Live JSONL log — one line per turn
+cat recon_<hash>/agent.log
+
+# Pretty-print the last turn from agent.log
+tail -1 recon_<hash>/agent.log | python3 -m json.tool
+
+# All raw tool output files
+ls recon_<hash>/raw/
+
+# Parsed JSON output per tool call
+ls recon_<hash>/parsed/
+
+# Look at a specific raw output file
+cat recon_<hash>/raw/katana_evil.com_20241022T*.txt
+
+# Count discovered subdomains from a subfinder run
+grep -v '^#' recon_<hash>/raw/subfinder_*.txt | wc -l
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 7. SCOPE.JSON — KEY FIELDS TO EDIT
+────────────────────────────────────────────────────────────────────────────────
+
+# Minimal scope.json for one target:
+{
+  "in_scope": ["evil.com", "*.evil.com"],
+  "out_of_scope": ["staging.evil.com"],
+  "constraints": {
+    "max_concurrent_calls": 4,
+    "max_retries_per_call": 2,
+    "crawl_depth": 2,
+    "tool_timeout_seconds": { "katana": 1800, "ffuf": 900 },
+    "rate_limits": {
+      "subfinder": {"max_requests_per_min": 60},
+      "gau":       {"max_requests_per_min": 60},
+      "httpx":     {"max_requests_per_min": 30},
+      "ffuf":      {"max_requests_per_min": 15},
+      "katana":    {"max_requests_per_min": 15}
+    }
+  }
+}
+
+# Multi-target scope (several root domains in one run):
+{
+  "in_scope": ["evil.com", "*.evil.com", "evilcorp.io", "*.evilcorp.io"],
+  "out_of_scope": ["staging.evil.com", "vpn.evilcorp.io"],
+  "constraints": { ... }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 8. ESCALATION — What happens when a tool keeps failing
+────────────────────────────────────────────────────────────────────────────────
+
+When a tool call fails more than max_retries_per_call times, the agent
+PAUSES and asks you directly in the terminal:
+
+  ⚠  ESCALATION: Tool call has hit the retry cap.
+     Tool:    katana
+     Target:  evil.com
+     Attempt: 3
+     Failure: exit_code=1
+     Raw output: recon_<hash>/raw/katana_evil.com_*.txt
+
+  Options:
+    skip   — mark permanently failed, continue the run
+    retry  — reset count to 0, allow the model to try again
+    abort  — stop immediately and write summary.md
+
+  Your choice [skip/retry/abort]: _
+
+Type one of: skip / retry / abort  then press Enter.
+
+  skip  → agent continues without that tool's data
+  retry → useful if you just fixed something (started a VPN, fixed a path)
+  abort → writes summary.md with everything gathered so far, then exits
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 9. USEFUL ONE-LINERS FOR AFTER THE RUN
+────────────────────────────────────────────────────────────────────────────────
+
+# How many turns did the agent take?
+grep -c '"turn"' recon_<hash>/agent.log
+
+# List every tool called across all turns
+grep -o '"tool": "[^"]*"' recon_<hash>/agent.log | sort | uniq -c | sort -rn
+
+# List out-of-scope discoveries that were flagged
+grep -o '"discoveries_flagged": \[[^]]*\]' recon_<hash>/agent.log
+
+# Show all escalations
+grep '"escalated": true' recon_<hash>/agent.log
+
+# Open the final summary
+less recon_<hash>/summary.md
+
+
+────────────────────────────────────────────────────────────────────────────────
+ 10. TROUBLESHOOTING
+────────────────────────────────────────────────────────────────────────────────
+
+Problem: "connection refused" talking to Ollama
+  → Make sure `ollama serve` is running in another terminal.
+  → Default address: http://localhost:11434
+
+Problem: Model "forgets" earlier turns mid-run
+  → Increase --num-ctx: python3 agent.py -t evil.com --num-ctx 16384
+  → Default is 8192. Ollama's own default is 2048 (way too small).
+
+Problem: Model proposes the same call over and over
+  → Already-succeeded calls are automatically rejected by the call-state gate.
+  → If it's looping on a failing call, increase --max-iterations or let
+    the escalation prompt fire and choose skip.
+
+Problem: Tool not found (subfinder/ffuf/katana etc.)
+  → Kali has most of these. Install any missing ones:
+    go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+    go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+    go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+    go install -v github.com/lc/gau/v2/cmd/gau@latest
+    sudo apt install ffuf
+    pip install linkfinder
+    go install github.com/003random/getJS@latest
+
+Problem: pydantic / ollama not found
+  → pip install -r requirements.txt --break-system-packages
+  → Or activate your venv first: source .venv/bin/activate
+
+Problem: Rate limit errors from target
+  → Lower the rate limits in scope.json under constraints.rate_limits
+  → Lower max_concurrent_calls in scope.json
+
+================================================================================

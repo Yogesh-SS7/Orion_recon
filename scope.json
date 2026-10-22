@@ -1,0 +1,21 @@
+{
+  "in_scope": ["target.com", "*.target.com"],
+  "out_of_scope": ["staging.target.com"],
+  "constraints": {
+    "max_concurrent_calls": 4,
+    "max_retries_per_call": 2,
+    "request_delay_ms": 0,
+    "crawl_depth": 2,
+    "tool_timeout_seconds": {
+      "katana": 1800,
+      "ffuf": 900
+    },
+    "rate_limits": {
+      "subfinder": {"max_requests_per_min": 60},
+      "gau":       {"max_requests_per_min": 60},
+      "httpx":     {"max_requests_per_min": 30},
+      "ffuf":      {"max_requests_per_min": 15},
+      "katana":    {"max_requests_per_min": 15}
+    }
+  }
+}
