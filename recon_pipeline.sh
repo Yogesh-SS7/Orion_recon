@@ -8,7 +8,11 @@
 # Requires: subfinder, ffuf, gau, httpx, katana, getJS, linkfinder, gf,
 #           python3 (for pattern_dedupe.py, must be in same folder)
 # =====================================================================
-set -e
+set -euo pipefail
+
+# Print exactly which command failed and on which line — no more silent exits.
+trap 'echo "" >&2; echo "❌ ERROR: Pipeline failed at line $LINENO — command: $BASH_COMMAND" >&2; echo "    Check the files in $WORKDIR for partial results." >&2' ERR
+
 
 if [ -z "$1" ]; then
     echo "Usage: $0 <target-domain>"

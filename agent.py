@@ -356,6 +356,20 @@ def run_agent(
     print(f"[agent] Output directory: {outdir}")
     print(f"[agent] Model: {model}  num_ctx: {num_ctx}  max_batch_size: {max_batch_size}")
 
+    # Write a startup entry immediately — before the first model call — so that
+    # agent.log always exists even if the run crashes on turn 1.
+    append_log(log_path, {
+        "event": "startup",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "model": model,
+        "num_ctx": num_ctx,
+        "max_batch_size": max_batch_size,
+        "scope_path": str(scope_path),
+        "outdir": str(outdir),
+        "in_scope": scope.in_scope,
+        "out_of_scope": scope.out_of_scope,
+    })
+
     # --- Executor (owns pool + rate limiters for the whole run) ---
     executor = Executor(scope.constraints, outdir)
 
@@ -437,17 +451,56 @@ def run_agent(
                 time.sleep(5)
                 continue
 
-            msg = response.get("message", {})
-            model_text = msg.get("content", "") or ""
-            raw_tool_calls = msg.get("tool_calls") or []
+            # Parse the response — ollama returns a ChatResponse object (attribute
+            # access), NOT a plain dict.  Using .get() on it raises AttributeError
+            # and kills the run before agent.log is ever written.
+            try:
+                msg = response.message
+                model_text = (msg.content or "").strip() if msg.content is not None else ""
+                raw_tool_calls = msg.tool_calls or []
+            except AttributeError:
+                # Fallback: some ollama versions return a plain dict.
+                try:
+                    msg = response.get("message", {})
+                    model_text = (msg.get("content", "") or "").strip()
+                    raw_tool_calls = msg.get("tool_calls") or []
+                except Exception as exc:
+                    print(f"[agent] ERROR: Could not parse Ollama response: {exc}", file=sys.stderr)
+                    print(f"[agent]   Raw response type: {type(response)}, value: {response!r}", file=sys.stderr)
+                    print("[agent] Waiting 5s before retry...")
+                    time.sleep(5)
+                    continue
 
             # 2. Check for final answer (no tool calls = model is done)
             if not raw_tool_calls:
-                if model_text.strip():
+                # Guard: don't accept a "final answer" if no tools have run yet.
+                # A 7B model sometimes produces a text reply on turn 1 instead of
+                # proposing tool calls — that would leave raw/ and parsed/ empty.
+                tools_have_run = any(
+                    e.state == CallState.SUCCEEDED
+                    for e in call_states.values()
+                )
+                if model_text.strip() and tools_have_run:
                     print("[agent] Model produced final answer.")
                     final_answer = model_text
                     conversation.append({"role": "assistant", "content": model_text})
                     break
+                elif model_text.strip() and not tools_have_run:
+                    print(
+                        "[agent] WARNING: Model tried to give a final answer before "
+                        "running any tools. Nudging it to start the pipeline."
+                    )
+                    conversation.append({"role": "assistant", "content": model_text})
+                    conversation.append({
+                        "role": "user",
+                        "content": (
+                            "You haven't run any recon tools yet. Do NOT provide a "
+                            "final answer until you have completed the pipeline steps. "
+                            "Start with subfinder and gau on the in-scope targets now."
+                        ),
+                    })
+                    turn += 1
+                    continue
                 else:
                     # Empty response — nudge the model
                     print("[agent] Empty model response. Nudging...")
@@ -478,9 +531,19 @@ def run_agent(
             log_tool_calls: list[dict] = []
 
             for raw_call in raw_tool_calls:
-                tool_name = raw_call.get("function", {}).get("name", "")
-                raw_args = raw_call.get("function", {}).get("arguments", {})
-                # Ollama sometimes stringifies args
+                # Ollama returns ToolCall objects with attribute access (.function.name,
+                # .function.arguments) — NOT dicts.  Some older versions return dicts.
+                # Handle both without crashing.
+                try:
+                    fn = raw_call.function
+                    tool_name = fn.name or ""
+                    raw_args = fn.arguments or {}
+                except AttributeError:
+                    # Fallback: dict-style (older ollama or mocked in tests)
+                    tool_name = raw_call.get("function", {}).get("name", "")
+                    raw_args = raw_call.get("function", {}).get("arguments", {})
+
+                # Ollama sometimes stringifies args even in object mode
                 if isinstance(raw_args, str):
                     try:
                         raw_args = json.loads(raw_args)
