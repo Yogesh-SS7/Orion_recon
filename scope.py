@@ -119,14 +119,14 @@ class ScopeChecker:
         target = target.strip()
         if target.startswith(("http://", "https://")):
             parsed = urlsplit(target)
-            return parsed.hostname or target
+            return (parsed.hostname or target).lower()
         # If it contains a slash that's not a URL scheme, treat as URL without
         # scheme — still try to extract host.
         if "/" in target and not target.startswith("/"):
             parsed = urlsplit("https://" + target)
-            return parsed.hostname or target
+            return (parsed.hostname or target).lower()
         # Plain host, CIDR, or IP — return as-is.
-        return target.split(":")[0]  # strip port if any
+        return target.split(":")[0].lower()  # strip port if any
 
     @staticmethod
     def _host_matches_pattern(host: str, pattern: str) -> bool:
@@ -137,9 +137,16 @@ class ScopeChecker:
           - An fnmatch glob         ("api.*.target.com")
           - A CIDR range            (not implemented here — stub as exact match)
         """
-        pattern = pattern.strip().lstrip("*.")
-        # Wildcard: any subdomain of pattern OR pattern itself.
-        return host == pattern or host.endswith("." + pattern)
+        host = host.strip().lower()
+        pattern = pattern.strip().lower()
+        if host == pattern:
+            return True
+        clean_pattern = pattern.lstrip("*.")
+        if host == clean_pattern or host.endswith("." + clean_pattern):
+            return True
+        if fnmatch.fnmatch(host, pattern):
+            return True
+        return False
 
     def _is_explicitly_excluded(self, host: str) -> bool:
         for excl in self._scope.out_of_scope:

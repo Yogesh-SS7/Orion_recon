@@ -4,7 +4,7 @@
 ================================================================================
 
 Date of Investigation : 2026-10-23
-Investigator          : Antigravity Agent
+Investigator          : Antigravity Agent (invoked via `python3 agent.py --target www.offsecdiary.com`)
 Target Codebase       : Orion_recon (Recon Orchestration Agent)
 Target Domain         : www.offsecdiary.com
 Environment           : Linux, Python 3.14, Ollama 0.6.3 (client), model qwen2.5-coder:latest (4.7 GB)

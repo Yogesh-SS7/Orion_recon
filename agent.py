@@ -825,22 +825,88 @@ def _extract_discoveries(tool: str, parsed) -> list[str]:
     """
     Return any hosts/URLs newly discovered by this tool call that should be
     scope-checked.  Only return items not already in the original target set.
+    Handles typed results, generic ParsedBase on parse failure, and dict fallbacks
+    so discoveries are never silently skipped from scope validation.
     """
-    from ingest import SubfinderResult, HttpxResult, KatanaResult, GauResult, GetJSResult, LinkFinderResult
+    if parsed is None:
+        return []
 
-    if isinstance(parsed, SubfinderResult):
-        return parsed.subdomains
-    if isinstance(parsed, HttpxResult):
-        return parsed.live_urls
-    if isinstance(parsed, KatanaResult):
-        return parsed.urls
-    if isinstance(parsed, GauResult):
-        return parsed.urls
-    if isinstance(parsed, GetJSResult):
-        return parsed.js_files
-    if isinstance(parsed, LinkFinderResult):
-        return parsed.endpoints
-    return []
+    discoveries: list[str] = []
+
+    # 1. Duck-typing / attribute / dict lookup
+    attr_map = {
+        "subfinder": ["subdomains"],
+        "httpx": ["live_urls"],
+        "katana": ["urls"],
+        "gau": ["urls"],
+        "getJS": ["js_files"],
+        "linkfinder": ["endpoints"],
+        "gf": ["matches"],
+        "ffuf": ["paths"],
+    }
+    candidate_attrs = attr_map.get(tool, ["subdomains", "live_urls", "urls", "js_files", "endpoints", "matches"])
+
+    for attr in candidate_attrs:
+        val = getattr(parsed, attr, None) if not isinstance(parsed, dict) else parsed.get(attr)
+        if isinstance(val, list) and val:
+            discoveries.extend([str(item) for item in val if item])
+
+    if discoveries:
+        return discoveries
+
+    # 2. Check isinstance for typed result objects as fallback
+    try:
+        from ingest import (
+            SubfinderResult,
+            HttpxResult,
+            KatanaResult,
+            GauResult,
+            GetJSResult,
+            LinkFinderResult,
+            GfResult,
+        )
+        if isinstance(parsed, SubfinderResult):
+            discoveries.extend(parsed.subdomains)
+        elif isinstance(parsed, HttpxResult):
+            discoveries.extend(parsed.live_urls)
+        elif isinstance(parsed, KatanaResult):
+            discoveries.extend(parsed.urls)
+        elif isinstance(parsed, GauResult):
+            discoveries.extend(parsed.urls)
+        elif isinstance(parsed, GetJSResult):
+            discoveries.extend(parsed.js_files)
+        elif isinstance(parsed, LinkFinderResult):
+            discoveries.extend(parsed.endpoints)
+        elif isinstance(parsed, GfResult):
+            discoveries.extend(parsed.matches)
+    except ImportError:
+        pass
+
+    if discoveries:
+        return discoveries
+
+    # 3. If parsed is a generic ParsedBase (e.g. parse failure or raw fallback),
+    # extract lines from raw_path so discovered items are not skipped from scope checks.
+    raw_path_val = getattr(parsed, "raw_path", None) if not isinstance(parsed, dict) else parsed.get("raw_path")
+    if raw_path_val:
+        p = Path(raw_path_val)
+        if p.exists() and p.is_file():
+            try:
+                lines = [
+                    ln.strip()
+                    for ln in p.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if ln.strip() and not ln.strip().startswith("#")
+                ]
+                if tool == "subfinder":
+                    discoveries.extend([ln for ln in lines if "." in ln and not ln.startswith("http")])
+                elif tool in ("httpx", "katana", "gau", "getJS", "linkfinder"):
+                    discoveries.extend([ln for ln in lines if ln.startswith(("http://", "https://")) or "." in ln])
+                else:
+                    discoveries.extend(lines)
+            except Exception:
+                pass
+
+    return discoveries
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +918,8 @@ def _build_scope_from_target(target: str, exclude: list[str]) -> dict:
     """
     Auto-generate a minimal scope dict from a bare domain string.
     Automatically includes the root domain AND *.root wildcard.
+    If a www subdomain is passed, also include the apex domain and its wildcard
+    so sister subdomains are not excluded.
     """
     # Strip any scheme the user may have typed (https://evil.com -> evil.com)
     domain = target.strip().lower()
@@ -860,8 +928,15 @@ def _build_scope_from_target(target: str, exclude: list[str]) -> dict:
             domain = domain[len(prefix):]
     domain = domain.rstrip("/")
 
+    in_scope = [domain, f"*.{domain}"]
+    if domain.startswith("www."):
+        apex = domain[4:]
+        if apex:
+            in_scope.extend([apex, f"*.{apex}"])
+    in_scope = list(dict.fromkeys(in_scope))
+
     return {
-        "in_scope": [domain, f"*.{domain}"],
+        "in_scope": in_scope,
         "out_of_scope": [e.strip() for e in exclude if e.strip()],
         "constraints": {
             "max_concurrent_calls": 4,

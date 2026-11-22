@@ -1,5 +1,6 @@
 improvements.txt
-recon_59716645abfe/
-recon_1614312cc1d6/
+recon_*/
 __pycache__/
 *.pyc
+.ua/
+
